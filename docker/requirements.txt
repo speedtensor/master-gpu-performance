@@ -1,0 +1,10 @@
+torch>=2.4.0
+torchvision
+transformers>=4.45.0
+accelerate
+datasets
+qwen-vl-utils
+pillow
+requests
+safetensors
+huggingface_hub
