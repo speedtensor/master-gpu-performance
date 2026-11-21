@@ -126,11 +126,11 @@ class CallbackHandler:
 def parse_args():
     parser = argparse.ArgumentParser(description="Qwen2-VL Callback Profiling Script")
     parser.add_argument("--batch_size", type=int, default=1, help="Training batch size")
-    parser.add_argument("--total_steps", type=int, default=6, help="Total steps to run")
-    parser.add_argument("--profile_start_step", type=int, default=3, help="Step to start profiling")
-    parser.add_argument("--profile_steps", type=int, default=2, help="Number of steps to profile")
-    parser.add_argument("--max_pixels", type=int, default=512 * 512, help="Max pixels for image tokens")
-    parser.add_argument("--max_length", type=int, default=1024, help="Max text sequence length")
+    parser.add_argument("--total_steps", type=int, default=30, help="Total steps to run")
+    parser.add_argument("--profile_start_step", type=int, default=20, help="Step to start profiling")
+    parser.add_argument("--profile_steps", type=int, default=6, help="Number of steps to profile")
+    parser.add_argument("--max_pixels", type=int, default=16384, help="Max pixels for image tokens")
+    parser.add_argument("--max_length", type=int, default=512, help="Max text sequence length")
     parser.add_argument("--enable_torch_profiler", action="store_true", help="Enable PyTorch profiler")
     parser.add_argument("--enable_cuda_profiler_api", action="store_true", help="Enable CUDA API triggers")
     return parser.parse_args()
@@ -151,15 +151,23 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device} | Batch Size: {args.batch_size}")
 
-    # Load Model & Processor on the fly from Hugging Face
+    # Load Model & Processor on the fly from Hugging Face with memory safeguards
     model_id = "Qwen/Qwen2-VL-2B-Instruct"
-    processor = AutoProcessor.from_pretrained(model_id)
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        min_pixels=16 * 28 * 28,
+        max_pixels=args.max_pixels,
+    )
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_id, torch_dtype=torch.bfloat16, device_map="auto"
     )
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
     model.train()
 
-    # Prepare Data Inputs on the fly
+    # Prepare Data Inputs on the fly (Marked with NVTX for data loading/prep phase)
+    torch.cuda.nvtx.range_push("Data_Loading_Preparation")
     image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
     image = Image.open(BytesIO(requests.get(image_url).content)).convert("RGB")
     single_message = {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": "Describe this image briefly."}]}
@@ -177,6 +185,7 @@ def main():
         text=texts, images=image_inputs_list or None, videos=video_inputs_list or None,
         padding=True, max_length=args.max_length, truncation=False, return_tensors="pt"
     ).to(device)
+    torch.cuda.nvtx.range_pop()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
@@ -187,23 +196,37 @@ def main():
     if args.enable_cuda_profiler_api:
         callback_handler.add_callback(CudaProfilerApiCallback(args.profile_start_step, args.profile_steps))
 
-    # Training Loop with Callbacks
+    # Training Loop with Granular NVTX Ranges
     print(f"Starting training loop ({args.total_steps} steps)...")
     callback_handler.on_train_begin(args)
 
     for step in range(args.total_steps):
         callback_handler.on_step_begin(step)
+
+        # Outer wrapper for the entire step
         torch.cuda.nvtx.range_push(f"Step_{step}")
         
         optimizer.zero_grad()
+
+        # 1. Forward Pass NVTX Range
+        torch.cuda.nvtx.range_push("Forward_Pass")
         outputs = model(**inputs, labels=inputs["input_ids"])
         loss = outputs.loss
-        loss.backward()
-        optimizer.step()
-        
         torch.cuda.nvtx.range_pop()
-        print(f"Step {step}/{args.total_steps} - Loss: {loss.item():.4f}")
 
+        # 2. Backward Pass NVTX Range
+        torch.cuda.nvtx.range_push("Backward_Pass")
+        loss.backward()
+        torch.cuda.nvtx.range_pop()
+
+        # 3. Optimizer Step NVTX Range
+        torch.cuda.nvtx.range_push("Optimizer_Step")
+        optimizer.step()
+        torch.cuda.nvtx.range_pop()
+
+        torch.cuda.nvtx.range_pop() # Pop Step_{step}
+
+        print(f"Step {step}/{args.total_steps} - Loss: {loss.item():.4f}")
         callback_handler.on_step_end(step, loss.item())
 
     callback_handler.on_train_end()

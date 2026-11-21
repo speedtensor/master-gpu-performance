@@ -7,8 +7,8 @@ set -e
 USE_DOCKER=true
 GPU_DEVICE="device=0"   # Target a single GPU (e.g., GPU 0)
 
-ENABLE_TORCH_PROF=true
-ENABLE_NSYS=false
+ENABLE_TORCH_PROF=false
+ENABLE_NSYS=true        # Set to true for Nsight Systems timeline profiling
 ENABLE_NCU=false        # Set to true for Nsight Compute kernel profiling
 
 # ==========================================
@@ -17,14 +17,14 @@ ENABLE_NCU=false        # Set to true for Nsight Compute kernel profiling
 HF_TOKEN="hf_your_actual_token_here"  # Replace with your actual HF token
 
 # ==========================================
-# 3. TRAINING & WINDOW PARAMETERS
+# 3. TRAINING & WINDOW PARAMETERS (Steps 20-25)
 # ==========================================
 BATCH_SIZE=1
-TOTAL_STEPS=6
-PROFILE_START_STEP=3
-PROFILE_STEPS=2
-MAX_PIXELS=$((512 * 512))
-MAX_LENGTH=1024
+TOTAL_STEPS=30
+PROFILE_START_STEP=20
+PROFILE_STEPS=6
+MAX_PIXELS=16384        # Memory-safe resolution for 24GB L4 GPU
+MAX_LENGTH=512          # Reduced text sequence length for stability
 
 DOCKER_IMAGE="qwen2vl-profiler:latest"
 
@@ -64,11 +64,12 @@ if [ "$ENABLE_NSYS" = true ]; then
         --force-overwrite=true \
         $CMD"
 
-# Wrap with Nsight Compute (ncu)
+# Wrap with Nsight Compute (ncu) with stability fixes
 elif [ "$ENABLE_NCU" = true ]; then
     echo "==> Wrapping with Nsight Compute..."
     CMD="ncu \
-        --set full \
+        --set basic \
+        --replay-mode application \
         --profile-from-start off \
         --target-processes all \
         --output=ncu_qwen_report \
