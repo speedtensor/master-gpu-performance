@@ -5,16 +5,16 @@ set -e
 # 1. PROFILER & HARDWARE TOGGLES
 # ==========================================
 USE_DOCKER=true
-GPU_DEVICE="device=0"   # Target a single GPU (e.g., GPU 0)
+GPU_DEVICE="device=0"
 
-ENABLE_TORCH_PROF=true
-ENABLE_NSYS=false
-ENABLE_NCU=false        # Set to true for Nsight Compute kernel profiling
+ENABLE_TORCH_PROF=false
+ENABLE_NSYS=true        # Set to true for Nsight Systems profiling
+ENABLE_NCU=false
 
 # ==========================================
 # 2. HUGGING FACE TOKEN
 # ==========================================
-HF_TOKEN="hf_your_actual_token_here"  # Replace with your actual HF token
+HF_TOKEN="hf_your_actual_token_here"
 
 # ==========================================
 # 3. TRAINING & WINDOW PARAMETERS
@@ -28,13 +28,11 @@ MAX_LENGTH=512
 
 DOCKER_IMAGE="qwen2vl-profiler:latest"
 
-# Build Docker image if enabled
 if [ "$USE_DOCKER" = true ]; then
     echo "==> Building Docker image..."
     docker build -t $DOCKER_IMAGE docker/
 fi
 
-# Construct Python arguments
 PY_ARGS="\
 --batch_size $BATCH_SIZE \
 --total_steps $TOTAL_STEPS \
@@ -53,22 +51,23 @@ fi
 
 CMD="python train_qwen.py $PY_ARGS"
 
-# Wrap with Nsight Systems (nsys)
+# Nsight Systems configuration with backtrace collection enabled
 if [ "$ENABLE_NSYS" = true ]; then
-    echo "==> Wrapping with Nsight Systems..."
+    echo "==> Wrapping with Nsight Systems (with backtraces & dataloader visibility)..."
     CMD="nsys profile \
         --trace=cuda,nvtx,osrt \
+        --sample=process-tree \
+        --cudabacktrace=all \
+        --python-backtrace=cuda \
         --capture-range=cudaProfilerApi \
         --capture-range-end=stop \
         --output=nsys_qwen_report \
         --force-overwrite=true \
         $CMD"
-
-# Wrap with Nsight Compute (ncu)
 elif [ "$ENABLE_NCU" = true ]; then
     echo "==> Wrapping with Nsight Compute..."
     CMD="ncu \
-        --set full \
+        --set basic \
         --profile-from-start off \
         --target-processes all \
         --output=ncu_qwen_report \
@@ -76,9 +75,8 @@ elif [ "$ENABLE_NCU" = true ]; then
         $CMD"
 fi
 
-# Execute inside Docker (Single GPU) or Locally
 if [ "$USE_DOCKER" = true ]; then
-    echo "==> Running inside Docker container on single GPU ($GPU_DEVICE)..."
+    echo "==> Running inside Docker container..."
     docker run --rm --gpus "$GPU_DEVICE" --ipc=host \
         --cap-add=SYS_ADMIN \
         -v $(pwd):/workspace \
@@ -87,8 +85,8 @@ if [ "$USE_DOCKER" = true ]; then
         $DOCKER_IMAGE \
         bash -c "$CMD"
 else
-    echo "==> Running locally on single GPU..."
+    echo "==> Running locally..."
     CUDA_VISIBLE_DEVICES=0 HF_TOKEN=$HF_TOKEN eval $CMD
 fi
 
-echo "==> Done! Check your workspace directory for generated profile outputs."
+echo "==> Done! Open nsys_qwen_report.nsys-rep in Nsight Systems GUI."
